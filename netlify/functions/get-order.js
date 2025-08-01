@@ -121,11 +121,14 @@ exports.handler = async (event, context) => {
               trackingUrl = getTrackingUrlFallback(shipment.carrierCode, shipment.trackingNumber);
             }
 
+            console.log(`Shipment ${i + 1}: Carrier=${shipment.carrierCode}, Tracking=${shipment.trackingNumber}, URL=${trackingUrl}`);
+
             shipments.push({
               shipmentId: shipment.shipmentId,
               trackingNumber: shipment.trackingNumber,
               trackingUrl: trackingUrl,
               carrierCode: shipment.carrierCode,
+              carrierName: standardizeCarrierName(shipment.carrierCode),
               shipDate: shipment.shipDate,
               deliveryDate: shipment.deliveryDate || null,
               shipmentNumber: i + 1,
@@ -229,13 +232,40 @@ async function getTrackingUrlFromV2(trackingNumber, v2ApiKey) {
 
 // Fallback function to construct tracking URLs manually
 function getTrackingUrlFallback(carrierCode, trackingNumber) {
+  if (!trackingNumber) return null;
+  
   const carriers = {
     'ups': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`,
     'fedex': `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`,
     'usps': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
     'dhl': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
-    'stamps_com': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`
+    'stamps_com': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
+    'dhl_express': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
+    'fedex_express': `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`,
+    'fedex_ground': `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`,
+    'ups_ground': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`
   };
   
   return carriers[carrierCode?.toLowerCase()] || null;
+}
+
+// Function to standardize carrier names
+function standardizeCarrierName(carrierCode) {
+  const carrierNames = {
+    'ups': 'UPS',
+    'ups_ground': 'UPS',
+    'fedex': 'FedEx',
+    'fedex_express': 'FedEx',
+    'fedex_ground': 'FedEx',
+    'usps': 'USPS',
+    'stamps_com': 'USPS',
+    'dhl': 'DHL',
+    'dhl_express': 'DHL',
+    'ontrac': 'OnTrac',
+    'lasership': 'LaserShip',
+    'amazon': 'Amazon',
+    'newgistics': 'Newgistics'
+  };
+  
+  return carrierNames[carrierCode?.toLowerCase()] || carrierCode?.toUpperCase() || 'CARRIER';
 }
