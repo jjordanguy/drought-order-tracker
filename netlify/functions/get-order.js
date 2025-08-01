@@ -1,14 +1,12 @@
-// Netlify Function: get-order (v2.1)
+// Netlify Function: get-order (v2.2)
 // -----------------------------------
 // ✱ Change log (2025‑08‑01)
-// • NOW filters out label‑only shipments: frontend receives **only** parcels that
-//   17TRACK shows as scanned (actuallyShipped==true) or already delivered.
-// • Re‑calculates shipment counts after filtering so numbering stays correct.
-// • Minor tidy‑ups in comments; logic otherwise unchanged from v2.
+// • **Removed Ajv** to shrink bundle size for Netlify. Now uses a tiny inline
+//   validator (basicValidate) for orderNumber & email.
+// • All other logic unchanged from v2.1: only shipments with at least one scan
+//   (or delivered) are returned to the front‑end.
 
 const https = require('https');
-const Ajv = require('ajv');
-const ajv = new Ajv({ allErrors: true });
 
 // ------------------------------- Constants
 const SEVENTEEN_HOST = 'api.17track.net';
@@ -17,22 +15,19 @@ const SHIPSTATION_HOST = 'ssapi.shipstation.com';
 const DEFAULT_TIMEOUT = 15_000; // ms
 const MAX_RETRIES = 3;
 
-// ------------------------------- Schemas
-const requestSchema = {
-  type: 'object',
-  properties: {
-    orderNumber: { type: 'string', minLength: 3 },
-    email: {
-      type: 'string',
-      pattern: '^[^\s@]+@[^\s@]+\.[^\s@]+$'
-    }
-  },
-  required: ['orderNumber', 'email'],
-  additionalProperties: false
-};
-const validateRequest = ajv.compile(requestSchema);
+// ------------------------------- Lightweight Request Validation
+function basicValidate(body) {
+  if (!body || typeof body !== 'object') return 'Request body must be a JSON object';
+  const { orderNumber, email } = body;
+  if (typeof orderNumber !== 'string' || orderNumber.trim().length < 3)
+    return 'orderNumber must be at least 3 characters';
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (typeof email !== 'string' || !emailRegex.test(email.trim()))
+    return 'email must be a valid address';
+  return null; // valid
+}
 
-// ------------------------------- Helpers
+// ------------------------------- Helper: Standardised JSON response
 const respond = (statusCode, body = {}, headers = {}) => ({
   statusCode,
   headers: {
@@ -45,7 +40,7 @@ const respond = (statusCode, body = {}, headers = {}) => ({
   body: JSON.stringify(body)
 });
 
-// ShipStation carrier → 17TRACK numeric code
+// ------------------------------- Carrier mapping (ShipStation → 17TRACK)
 function mapCarrierTo17(code = '') {
   const map = {
     ups: 100002,
@@ -65,12 +60,12 @@ function mapCarrierTo17(code = '') {
   return map[code.toLowerCase()] ?? 0; // 0 = auto‑detect
 }
 
-// Parse 17TRACK v2.2 track_info block
+// ------------------------------- 17TRACK parser
 function parse17(trackInfo = {}) {
   const info = trackInfo.track_info || trackInfo.track || {};
   const latest = info.latest_status || {};
   const events = info.events || info.z0 || [];
-  const status = (latest.status || '').toLowerCase(); // e.g. intransit
+  const status = (latest.status || '').toLowerCase();
   const shipped = status && status !== 'notfound' && status !== 'inforeceived';
   const delivered = status === 'delivered';
   const latestEvt = events[0] || {};
@@ -87,14 +82,14 @@ function parse17(trackInfo = {}) {
   };
 }
 
-// HTTPS request with timeout & retries (429 / 5xx)
+// ------------------------------- HTTPS request with timeout & basic retries
 function httpsRequest(opts, body = null, attempt = 1) {
   return new Promise((resolve, reject) => {
     const req = https.request({ ...opts }, res => {
       let data = '';
       res.on('data', d => (data += d));
       res.on('end', () => {
-        // retry logic
+        // retry on 429 or 5xx
         if ((res.statusCode === 429 || res.statusCode >= 500) && attempt < MAX_RETRIES) {
           const delay = 2 ** attempt * 500;
           return setTimeout(() =>
@@ -102,7 +97,6 @@ function httpsRequest(opts, body = null, attempt = 1) {
             delay
           );
         }
-        // success
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try {
             return resolve(JSON.parse(data || '{}'));
@@ -110,8 +104,7 @@ function httpsRequest(opts, body = null, attempt = 1) {
             return reject(new Error('JSON parse error'));
           }
         }
-        // error
-        reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+        return reject(new Error(`HTTP ${res.statusCode}: ${data}`));
       });
     });
 
@@ -126,26 +119,23 @@ function httpsRequest(opts, body = null, attempt = 1) {
   });
 }
 
-// -------- ShipStation generic GET
-action("-ssRequest");
+// ------------------------------- ShipStation & 17TRACK helpers
 async function ssRequest(path, auth) {
-  const opts = {
+  return httpsRequest({
     hostname: SHIPSTATION_HOST,
     path,
     method: 'GET',
     headers: {
       Authorization: `Basic ${auth}`,
-      'User-Agent': 'Drought-Order-Tracker/2.1',
+      'User-Agent': 'Drought-Order-Tracker/2.2',
       'Content-Type': 'application/json'
     }
-  };
-  return httpsRequest(opts);
+  });
 }
 
-// -------- 17TRACK POST
 async function t17Request(endpoint, data, apiKey) {
   const body = JSON.stringify(data);
-  const opts = {
+  return httpsRequest({
     hostname: SEVENTEEN_HOST,
     path: `${SEVENTEEN_PATH}${endpoint}`,
     method: 'POST',
@@ -154,11 +144,9 @@ async function t17Request(endpoint, data, apiKey) {
       'Content-Length': Buffer.byteLength(body),
       '17token': apiKey
     }
-  };
-  return httpsRequest(opts, body);
+  }, body);
 }
 
-// Verify shipment list via 17TRACK – returns array w/ actuallyShipped flag
 async function verifyShipments(shipments, apiKey) {
   const verified = [];
   for (const sh of shipments) {
@@ -168,11 +156,10 @@ async function verifyShipments(shipments, apiKey) {
       continue;
     }
     const carrier = mapCarrierTo17(sh.carrierCode);
-    // Register (fire & forget)
-    try {
-      await t17Request('/register', [{ number, carrier }], apiKey);
-    } catch {}
-    // Fetch info
+    // register (best‑effort)
+    try { await t17Request('/register', [{ number, carrier }], apiKey); } catch {}
+
+    // fetch info
     let trackResp;
     try {
       trackResp = await t17Request('/gettrackinfo', [{ number, carrier }], apiKey);
@@ -205,9 +192,9 @@ exports.handler = async event => {
   } catch {
     return respond(400, { error: 'Invalid JSON' });
   }
-  if (!validateRequest(body)) {
-    return respond(400, { error: 'Invalid parameters', details: ajv.errorsText(validateRequest.errors) });
-  }
+
+  const validationError = basicValidate(body);
+  if (validationError) return respond(400, { error: validationError });
 
   const { orderNumber, email } = body;
   const apiKey = process.env.SHIPSTATION_API_KEY;
@@ -227,7 +214,9 @@ exports.handler = async event => {
   }
   if (!orderData.orders?.length) return respond(404, { error: 'Order not found' });
 
-  const order = orderData.orders.find(o => o.orderNumber === orderNumber && o.customerEmail.toLowerCase() === email.toLowerCase());
+  const order = orderData.orders.find(o =>
+    o.orderNumber === orderNumber && o.customerEmail.toLowerCase() === email.toLowerCase()
+  );
   if (!order) return respond(404, { error: 'Order not found' });
 
   // ---------- Fetch shipments (labels generated in ShipStation)
@@ -237,14 +226,12 @@ exports.handler = async event => {
     shipments = shResp.shipments || [];
   } catch {}
 
-  // ---------- Verify with 17TRACK then FILTER out label‑only parcels
+  // ---------- Verify with 17TRACK then filter label‑only parcels
   let verified = shipments;
   if (t17Key && shipments.length) verified = await verifyShipments(shipments, t17Key);
 
-  // Keep only shipments that have at least one courier scan or are delivered
   verified = verified.filter(s => s.actuallyShipped || s.isDelivered);
 
-  // Renumber after filtering
   const total = verified.length;
   verified = verified.map((s, i) => ({ ...s, shipmentNumber: i + 1, totalShipments: total }));
 
@@ -262,7 +249,7 @@ exports.handler = async event => {
   });
 };
 
-// --------------------- util stubs (unchanged)
+// --------------------- util stubs
 function generateTrackingUrl() {
   return null;
 }
