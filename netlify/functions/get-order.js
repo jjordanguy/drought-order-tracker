@@ -93,6 +93,12 @@ exports.handler = async (event, context) => {
       };
     }
 
+    // Get 17track API key
+    const seventeenTrackKey = process.env.SEVENTEEN_TRACK_API_KEY;
+    if (!seventeenTrackKey) {
+      console.error('Missing 17track API key');
+    }
+
     // Create auth header for ShipStation V1
     const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
     
@@ -147,6 +153,9 @@ exports.handler = async (event, context) => {
 
     // Get tracking information for any order that has shipping activity
     let shipments = [];
+    let actuallyShippedCount = 0;
+    let totalShipmentCount = 0;
+    
     if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered' || order.orderStatus === 'awaiting_shipment') {
       try {
         console.log(`Fetching shipments for order: ${cleanOrderNumber}`);
@@ -154,35 +163,68 @@ exports.handler = async (event, context) => {
         
         if (shipmentData.shipments && shipmentData.shipments.length > 0) {
           console.log(`Found ${shipmentData.shipments.length} shipments`);
+          totalShipmentCount = shipmentData.shipments.length;
           
-          // Process each shipment and check individual delivery status
-          shipmentData.shipments.forEach((shipment, index) => {
-            const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
-            const carrierName = getStandardCarrierName(shipment.carrierCode);
+          // If 17track is available, verify shipments
+          if (seventeenTrackKey) {
+            const verifiedShipments = await verifyShipmentsWithSeventeenTrack(
+              shipmentData.shipments, 
+              seventeenTrackKey
+            );
             
-            // Check if this individual shipment is delivered
-            const isDelivered = checkShipmentDeliveryStatus(shipment);
-            
-            console.log(`Shipment ${index + 1}: ${shipment.carrierCode} -> ${carrierName}`);
-            console.log(`  - Tracking: ${shipment.trackingNumber}`);
-            console.log(`  - URL: ${trackingUrl}`);
-            console.log(`  - Ship Date: ${shipment.shipDate}`);
-            console.log(`  - Delivery Status: ${isDelivered ? 'Delivered' : 'In Transit'}`);
-            console.log(`  - Shipment Details:`, JSON.stringify(shipment, null, 2));
-            
-            shipments.push({
-              shipmentId: shipment.shipmentId,
-              trackingNumber: shipment.trackingNumber,
-              trackingUrl: trackingUrl,
-              carrierCode: shipment.carrierCode,
-              carrierName: carrierName,
-              shipDate: shipment.shipDate,
-              deliveryDate: shipment.deliveryDate || null,
-              isDelivered: isDelivered,
-              shipmentNumber: index + 1,
-              totalShipments: shipmentData.shipments.length
+            // Only include shipments that have actually been shipped according to 17track
+            verifiedShipments.forEach((shipment, index) => {
+              if (shipment.actuallyShipped) {
+                actuallyShippedCount++;
+                const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
+                const carrierName = getStandardCarrierName(shipment.carrierCode);
+                
+                shipments.push({
+                  shipmentId: shipment.shipmentId,
+                  trackingNumber: shipment.trackingNumber,
+                  trackingUrl: trackingUrl,
+                  carrierCode: shipment.carrierCode,
+                  carrierName: carrierName,
+                  shipDate: shipment.shipDate,
+                  deliveryDate: shipment.deliveryDate || null,
+                  isDelivered: shipment.isDelivered,
+                  shipmentNumber: actuallyShippedCount,
+                  totalShipments: actuallyShippedCount, // Will be updated after loop
+                  latestActivity: shipment.latestActivity || null,
+                  items: shipment.shipmentItems || []
+                });
+              }
             });
-          });
+            
+            // Update total shipments count for display
+            shipments.forEach(s => {
+              s.totalShipments = actuallyShippedCount;
+            });
+            
+          } else {
+            // Fallback to original behavior if 17track not configured
+            console.log('17track not configured, using ShipStation data only');
+            
+            shipmentData.shipments.forEach((shipment, index) => {
+              const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
+              const carrierName = getStandardCarrierName(shipment.carrierCode);
+              const isDelivered = checkShipmentDeliveryStatus(shipment);
+              
+              shipments.push({
+                shipmentId: shipment.shipmentId,
+                trackingNumber: shipment.trackingNumber,
+                trackingUrl: trackingUrl,
+                carrierCode: shipment.carrierCode,
+                carrierName: carrierName,
+                shipDate: shipment.shipDate,
+                deliveryDate: shipment.deliveryDate || null,
+                isDelivered: isDelivered,
+                shipmentNumber: index + 1,
+                totalShipments: shipmentData.shipments.length,
+                items: shipment.shipmentItems || []
+              });
+            });
+          }
         } else {
           console.log('No shipments found for this order');
         }
@@ -194,12 +236,21 @@ exports.handler = async (event, context) => {
       console.log(`Order status is '${order.orderStatus}', not checking for shipments`);
     }
 
+    // Determine effective order status based on 17track verification
+    let effectiveOrderStatus = order.orderStatus;
+    
+    // If ShipStation says shipped but nothing has actually shipped per 17track, keep it in processing
+    if (seventeenTrackKey && order.orderStatus === 'shipped' && actuallyShippedCount === 0 && totalShipmentCount > 0) {
+      console.log('Order marked as shipped in ShipStation but no shipments verified by 17track - treating as processing');
+      effectiveOrderStatus = 'awaiting_fulfillment';
+    }
+
     // Format response for frontend
     const response = {
       orderNumber: order.orderNumber,
       customerEmail: order.customerEmail,
       orderDate: order.orderDate,
-      orderStatus: order.orderStatus.toLowerCase(),
+      orderStatus: effectiveOrderStatus.toLowerCase(),
       shipments: shipments
     };
 
@@ -222,6 +273,176 @@ exports.handler = async (event, context) => {
     };
   }
 };
+
+// Helper function to verify shipments with 17track
+async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
+  const https = require('https');
+  const verifiedShipments = [];
+  
+  for (const shipment of shipments) {
+    if (!shipment.trackingNumber) {
+      console.log(`Shipment ${shipment.shipmentId} has no tracking number, skipping`);
+      verifiedShipments.push({
+        ...shipment,
+        actuallyShipped: false,
+        seventeenTrackStatus: 'no_tracking_number',
+        latestActivity: null
+      });
+      continue;
+    }
+    
+    try {
+      // First register the tracking number
+      const carrierCode = mapCarrierToSeventeenTrack(shipment.carrierCode);
+      const registerData = [{
+        number: shipment.trackingNumber,
+        carrier: carrierCode
+      }];
+      
+      console.log(`Registering tracking ${shipment.trackingNumber} with 17track (carrier: ${carrierCode})`);
+      
+      // Register tracking number
+      await makeSeventeenTrackRequest('/register', registerData, apiKey);
+      
+      // Get tracking info
+      const trackingData = await makeSeventeenTrackRequest('/gettrackinfo', [{
+        number: shipment.trackingNumber,
+        carrier: carrierCode
+      }], apiKey);
+      
+      console.log(`17track response for ${shipment.trackingNumber}:`, JSON.stringify(trackingData, null, 2));
+      
+      // Check if package has been received by carrier
+      const trackInfo = trackingData.data && trackingData.data.accepted && trackingData.data.accepted[0];
+      let actuallyShipped = false;
+      let isDelivered = false;
+      
+      let latestActivity = null;
+      
+      if (trackInfo && trackInfo.track) {
+        // Check track status - if there are any tracking events, it's been received by carrier
+        const hasTrackingEvents = trackInfo.track.z0 && trackInfo.track.z0.length > 0;
+        
+        // Check if status indicates it's been picked up
+        const statusCode = trackInfo.track.e;
+        // Status codes: 0=Not Found, 10=In Transit, 20=Expired, 30=Pickup, 35=Undelivered, 40=Delivered, 50=Alert
+        actuallyShipped = hasTrackingEvents && statusCode >= 10;
+        
+        // Check if delivered
+        isDelivered = statusCode === 40;
+        
+        // Get latest tracking activity
+        if (hasTrackingEvents && trackInfo.track.z0.length > 0) {
+          const latestEvent = trackInfo.track.z0[0]; // Most recent event is first
+          latestActivity = {
+            status: latestEvent.z || '',
+            location: latestEvent.c || '',
+            time: latestEvent.a || '',
+            description: latestEvent.z || ''
+          };
+        }
+        
+        console.log(`Tracking ${shipment.trackingNumber}: hasEvents=${hasTrackingEvents}, status=${statusCode}, shipped=${actuallyShipped}`);
+      }
+      
+      verifiedShipments.push({
+        ...shipment,
+        actuallyShipped: actuallyShipped,
+        isDelivered: isDelivered || checkShipmentDeliveryStatus(shipment),
+        seventeenTrackStatus: trackInfo ? 'verified' : 'not_found',
+        latestActivity: latestActivity
+      });
+      
+    } catch (error) {
+      console.error(`Failed to verify tracking ${shipment.trackingNumber} with 17track:`, error.message);
+      // If 17track fails, fall back to ShipStation data
+      verifiedShipments.push({
+        ...shipment,
+        actuallyShipped: true, // Assume shipped if we can't verify
+        isDelivered: checkShipmentDeliveryStatus(shipment),
+        seventeenTrackStatus: 'error',
+        latestActivity: null
+      });
+    }
+  }
+  
+  return verifiedShipments;
+}
+
+// Helper function to make 17track API requests
+function makeSeventeenTrackRequest(endpoint, data, apiKey) {
+  return new Promise((resolve, reject) => {
+    const https = require('https');
+    
+    const postData = JSON.stringify(data);
+    
+    const options = {
+      hostname: 'api.17track.net',
+      path: `/track/v2.2${endpoint}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+        '17token': apiKey
+      }
+    };
+    
+    const req = https.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            const parsedData = JSON.parse(data);
+            resolve(parsedData);
+          } catch (parseError) {
+            reject(new Error('Invalid response from 17track'));
+          }
+        } else {
+          console.error(`17track API error ${res.statusCode}:`, data);
+          reject(new Error(`17track API error: ${res.statusCode}`));
+        }
+      });
+    });
+    
+    req.on('error', (error) => {
+      reject(error);
+    });
+    
+    req.setTimeout(10000, () => {
+      req.destroy();
+      reject(new Error('17track request timeout'));
+    });
+    
+    req.write(postData);
+    req.end();
+  });
+}
+
+// Map carrier codes from ShipStation to 17track
+function mapCarrierToSeventeenTrack(shipstationCarrier) {
+  const carrierMapping = {
+    'ups': '100002',
+    'ups_ground': '100002',
+    'fedex': '100003',
+    'fedex_express': '100003',
+    'fedex_ground': '100003',
+    'usps': '100001',
+    'stamps_com': '100001',
+    'dhl': '100004',
+    'dhl_express': '100004',
+    'ontrac': '100143',
+    'lasership': '190014',
+    'amazon': '100099',
+    'newgistics': '190269'
+  };
+  
+  return carrierMapping[shipstationCarrier.toLowerCase()] || '0';
+}
 
 // Helper function to make ShipStation V1 API requests
 function makeShipStationRequest(endpoint, auth) {
