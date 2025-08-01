@@ -98,9 +98,9 @@ exports.handler = async (event, context) => {
     const order = orderData.orders[0];
     console.log(`Found order: ${order.orderNumber} with status: ${order.orderStatus}`);
 
-    // Get tracking information if order is shipped
+    // Get tracking information for any order that has shipping activity
     let shipments = [];
-    if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered') {
+    if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered' || order.orderStatus === 'awaiting_shipment') {
       try {
         console.log(`Fetching shipments for order: ${orderNumber.trim()}`);
         const shipmentData = await makeShipStationRequest(`/shipments?orderNumber=${orderNumber.trim()}`, auth);
@@ -108,12 +108,20 @@ exports.handler = async (event, context) => {
         if (shipmentData.shipments && shipmentData.shipments.length > 0) {
           console.log(`Found ${shipmentData.shipments.length} shipments`);
           
-          // Process each shipment
+          // Process each shipment and check individual delivery status
           shipmentData.shipments.forEach((shipment, index) => {
             const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
             const carrierName = getStandardCarrierName(shipment.carrierCode);
             
-            console.log(`Shipment ${index + 1}: ${shipment.carrierCode} -> ${carrierName}, tracking: ${shipment.trackingNumber}, URL: ${trackingUrl}`);
+            // Check if this individual shipment is delivered
+            const isDelivered = checkShipmentDeliveryStatus(shipment);
+            
+            console.log(`Shipment ${index + 1}: ${shipment.carrierCode} -> ${carrierName}`);
+            console.log(`  - Tracking: ${shipment.trackingNumber}`);
+            console.log(`  - URL: ${trackingUrl}`);
+            console.log(`  - Ship Date: ${shipment.shipDate}`);
+            console.log(`  - Delivery Status: ${isDelivered ? 'Delivered' : 'In Transit'}`);
+            console.log(`  - Shipment Details:`, JSON.stringify(shipment, null, 2));
             
             shipments.push({
               shipmentId: shipment.shipmentId,
@@ -123,15 +131,20 @@ exports.handler = async (event, context) => {
               carrierName: carrierName,
               shipDate: shipment.shipDate,
               deliveryDate: shipment.deliveryDate || null,
+              isDelivered: isDelivered,
               shipmentNumber: index + 1,
               totalShipments: shipmentData.shipments.length
             });
           });
+        } else {
+          console.log('No shipments found for this order');
         }
       } catch (shipmentError) {
         console.log('Could not fetch shipment info:', shipmentError.message);
         // Continue without tracking info rather than failing
       }
+    } else {
+      console.log(`Order status is '${order.orderStatus}', not checking for shipments`);
     }
 
     // Format response for frontend
@@ -247,6 +260,32 @@ function generateTrackingUrl(carrierCode, trackingNumber) {
   };
   
   return trackingUrls[carrierCode.toLowerCase()] || null;
+}
+
+// Function to check if a shipment is delivered
+function checkShipmentDeliveryStatus(shipment) {
+  // Check various fields that might indicate delivery
+  if (shipment.deliveryDate) {
+    return true;
+  }
+  
+  // Check if void date exists (might indicate cancellation, not delivery)
+  if (shipment.voidDate) {
+    return false;
+  }
+  
+  // Check shipment status if available
+  if (shipment.shipmentStatus && shipment.shipmentStatus.toLowerCase() === 'delivered') {
+    return true;
+  }
+  
+  // Check tracking status if available
+  if (shipment.trackingStatus && shipment.trackingStatus.toLowerCase().includes('delivered')) {
+    return true;
+  }
+  
+  // Default to not delivered if we can't determine
+  return false;
 }
 
 // Function to get standardized carrier names
