@@ -40,7 +40,7 @@ exports.handler = async (event, context) => {
 
     const { orderNumber, email } = requestBody;
 
-    // Validate inputs
+    // Validate inputs more strictly
     if (!orderNumber || !email) {
       return {
         statusCode: 400,
@@ -49,13 +49,34 @@ exports.handler = async (event, context) => {
       };
     }
 
+    // Clean and validate inputs
+    const cleanOrderNumber = orderNumber.trim();
+    const cleanEmail = email.trim();
+
+    if (!cleanOrderNumber || !cleanEmail) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: 'Order number and email cannot be empty' })
+      };
+    }
+
     // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!emailRegex.test(cleanEmail)) {
       return {
         statusCode: 400,
         headers,
         body: JSON.stringify({ error: 'Invalid email format' })
+      };
+    }
+
+    // Validate order number format (basic check)
+    if (cleanOrderNumber.length < 3) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({ error: 'Order number must be at least 3 characters' })
       };
     }
 
@@ -75,35 +96,61 @@ exports.handler = async (event, context) => {
     // Create auth header for ShipStation V1
     const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
     
-    // Search for order by number and email
+    // Search for order by number and email (exact matching)
     const searchParams = new URLSearchParams({
-      orderNumber: orderNumber.trim(),
-      customerEmail: email.trim().toLowerCase()
+      orderNumber: cleanOrderNumber,
+      customerEmail: cleanEmail // Keep original case for exact matching
     });
 
-    console.log(`Searching for order: ${orderNumber.trim()} with email: ${email.trim().toLowerCase()}`);
+    console.log(`Searching for exact match - Order: "${cleanOrderNumber}", Email: "${cleanEmail}"`);
 
     // Call ShipStation V1 API for orders
     const orderData = await makeShipStationRequest(`/orders?${searchParams}`, auth);
 
     if (!orderData.orders || orderData.orders.length === 0) {
+      console.log('No orders returned from ShipStation API');
       return {
         statusCode: 404,
         headers,
-        body: JSON.stringify({ error: 'Order not found. Please check your order number and email address.' })
+        body: JSON.stringify({ error: 'Order not found. Please check your order number and email address and try again.' })
       };
     }
 
-    // Get the matching order
-    const order = orderData.orders[0];
+    // Additional validation: Ensure exact match for order number and email
+    const exactMatch = orderData.orders.find(order => {
+      const orderMatches = order.orderNumber === cleanOrderNumber;
+      const emailMatches = order.customerEmail.toLowerCase() === cleanEmail.toLowerCase();
+      
+      console.log(`Checking order ${order.orderNumber}:`);
+      console.log(`  - Order number match: ${orderMatches} (${order.orderNumber} === ${cleanOrderNumber})`);
+      console.log(`  - Email match: ${emailMatches} (${order.customerEmail.toLowerCase()} === ${cleanEmail.toLowerCase()})`);
+      
+      return orderMatches && emailMatches;
+    });
+
+    if (!exactMatch) {
+      console.log('No exact match found in returned orders');
+      console.log('Available orders:', orderData.orders.map(o => ({
+        orderNumber: o.orderNumber,
+        customerEmail: o.customerEmail
+      })));
+      return {
+        statusCode: 404,
+        headers,
+        body: JSON.stringify({ error: 'Order not found. Please check your order number and email address and try again.' })
+      };
+    }
+
+    // Use the exact match
+    const order = exactMatch;
     console.log(`Found order: ${order.orderNumber} with status: ${order.orderStatus}`);
 
     // Get tracking information for any order that has shipping activity
     let shipments = [];
     if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered' || order.orderStatus === 'awaiting_shipment') {
       try {
-        console.log(`Fetching shipments for order: ${orderNumber.trim()}`);
-        const shipmentData = await makeShipStationRequest(`/shipments?orderNumber=${orderNumber.trim()}`, auth);
+        console.log(`Fetching shipments for order: ${cleanOrderNumber}`);
+        const shipmentData = await makeShipStationRequest(`/shipments?orderNumber=${cleanOrderNumber}`, auth);
         
         if (shipmentData.shipments && shipmentData.shipments.length > 0) {
           console.log(`Found ${shipmentData.shipments.length} shipments`);
@@ -213,9 +260,17 @@ function makeShipStationRequest(endpoint, auth) {
             reject(new Error('Invalid response from ShipStation'));
           }
         } else if (res.statusCode === 401) {
+          console.error('Authentication failed - check API credentials');
           reject(new Error('Invalid ShipStation API credentials'));
+        } else if (res.statusCode === 403) {
+          console.error('Access forbidden - check API permissions');
+          reject(new Error('Access denied by ShipStation API'));
         } else if (res.statusCode === 404) {
+          console.log('No data found for request');
           resolve({ orders: [], shipments: [] }); // No data found
+        } else if (res.statusCode === 429) {
+          console.error('Rate limit exceeded');
+          reject(new Error('Too many requests - please try again later'));
         } else {
           console.error(`API Error ${res.statusCode}:`, data);
           reject(new Error(`ShipStation API error: ${res.statusCode}`));
