@@ -59,13 +59,12 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Get ShipStation API credentials (use V1 for order lookup)
+    // Get ShipStation V1 API credentials
     const apiKey = process.env.SHIPSTATION_API_KEY;
     const apiSecret = process.env.SHIPSTATION_API_SECRET;
-    const v2ApiKey = process.env.SHIPSTATION_PRODUCTION_KEY;
 
     if (!apiKey || !apiSecret) {
-      console.error('Missing ShipStation V1 API credentials');
+      console.error('Missing ShipStation API credentials');
       return {
         statusCode: 500,
         headers,
@@ -76,14 +75,16 @@ exports.handler = async (event, context) => {
     // Create auth header for ShipStation V1
     const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
     
-    // Search for order by number and email using V1 API (more reliable for order lookup)
+    // Search for order by number and email
     const searchParams = new URLSearchParams({
       orderNumber: orderNumber.trim(),
       customerEmail: email.trim().toLowerCase()
     });
 
+    console.log(`Searching for order: ${orderNumber.trim()} with email: ${email.trim().toLowerCase()}`);
+
     // Call ShipStation V1 API for orders
-    const orderData = await makeShipStationV1Request(`/orders?${searchParams}`, auth);
+    const orderData = await makeShipStationRequest(`/orders?${searchParams}`, auth);
 
     if (!orderData.orders || orderData.orders.length === 0) {
       return {
@@ -95,37 +96,37 @@ exports.handler = async (event, context) => {
 
     // Get the matching order
     const order = orderData.orders[0];
+    console.log(`Found order: ${order.orderNumber} with status: ${order.orderStatus}`);
 
-    // Get all shipments for this order using V1 API
+    // Get tracking information if order is shipped
     let shipments = [];
     if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered') {
       try {
-        const shipmentData = await makeShipStationV1Request(`/shipments?orderNumber=${orderNumber.trim()}`, auth);
+        console.log(`Fetching shipments for order: ${orderNumber.trim()}`);
+        const shipmentData = await makeShipStationRequest(`/shipments?orderNumber=${orderNumber.trim()}`, auth);
+        
         if (shipmentData.shipments && shipmentData.shipments.length > 0) {
-          // For each shipment, try to get tracking URL from V2 API if available
-          for (let i = 0; i < shipmentData.shipments.length; i++) {
-            const shipment = shipmentData.shipments[i];
-            let trackingUrl = null;
+          console.log(`Found ${shipmentData.shipments.length} shipments`);
+          
+          // Process each shipment
+          shipmentData.shipments.forEach((shipment, index) => {
+            const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
+            const carrierName = getStandardCarrierName(shipment.carrierCode);
             
-            // Generate tracking URL using fallback method (V2 API doesn't have good order lookup yet)
-            if (shipment.trackingNumber) {
-              trackingUrl = getTrackingUrlFallback(shipment.carrierCode, shipment.trackingNumber);
-              console.log(`Generated tracking URL for ${shipment.carrierCode}: ${trackingUrl}`);
-            }
-
+            console.log(`Shipment ${index + 1}: ${shipment.carrierCode} -> ${carrierName}, tracking: ${shipment.trackingNumber}, URL: ${trackingUrl}`);
+            
             shipments.push({
               shipmentId: shipment.shipmentId,
               trackingNumber: shipment.trackingNumber,
               trackingUrl: trackingUrl,
               carrierCode: shipment.carrierCode,
-              carrierName: standardizeCarrierName(shipment.carrierCode),
+              carrierName: carrierName,
               shipDate: shipment.shipDate,
               deliveryDate: shipment.deliveryDate || null,
-              shipmentNumber: i + 1,
+              shipmentNumber: index + 1,
               totalShipments: shipmentData.shipments.length
             });
-          }
-          }
+          });
         }
       } catch (shipmentError) {
         console.log('Could not fetch shipment info:', shipmentError.message);
@@ -133,7 +134,7 @@ exports.handler = async (event, context) => {
       }
     }
 
-    // Format response for your frontend
+    // Format response for frontend
     const response = {
       orderNumber: order.orderNumber,
       customerEmail: order.customerEmail,
@@ -141,6 +142,8 @@ exports.handler = async (event, context) => {
       orderStatus: order.orderStatus.toLowerCase(),
       shipments: shipments
     };
+
+    console.log('Sending response:', JSON.stringify(response, null, 2));
 
     return {
       statusCode: 200,
@@ -161,7 +164,7 @@ exports.handler = async (event, context) => {
 };
 
 // Helper function to make ShipStation V1 API requests
-function makeShipStationV1Request(endpoint, auth) {
+function makeShipStationRequest(endpoint, auth) {
   return new Promise((resolve, reject) => {
     const https = require('https');
     
@@ -176,6 +179,8 @@ function makeShipStationV1Request(endpoint, auth) {
       }
     };
 
+    console.log(`Making request to: https://ssapi.shipstation.com${endpoint}`);
+
     const req = https.request(options, (res) => {
       let data = '';
 
@@ -184,10 +189,14 @@ function makeShipStationV1Request(endpoint, auth) {
       });
 
       res.on('end', () => {
+        console.log(`API Response Status: ${res.statusCode}`);
+        
         if (res.statusCode === 200) {
           try {
-            resolve(JSON.parse(data));
+            const parsedData = JSON.parse(data);
+            resolve(parsedData);
           } catch (parseError) {
+            console.error('JSON parse error:', parseError);
             reject(new Error('Invalid response from ShipStation'));
           }
         } else if (res.statusCode === 401) {
@@ -195,12 +204,14 @@ function makeShipStationV1Request(endpoint, auth) {
         } else if (res.statusCode === 404) {
           resolve({ orders: [], shipments: [] }); // No data found
         } else {
+          console.error(`API Error ${res.statusCode}:`, data);
           reject(new Error(`ShipStation API error: ${res.statusCode}`));
         }
       });
     });
 
     req.on('error', (error) => {
+      console.error('Request error:', error);
       reject(new Error(`Network error: ${error.message}`));
     });
 
@@ -214,41 +225,34 @@ function makeShipStationV1Request(endpoint, auth) {
   });
 }
 
-// Helper function to get tracking URL from V2 API labels endpoint
-async function getTrackingUrlFromV2(trackingNumber, v2ApiKey) {
-  // This would require finding the label by tracking number in V2 API
-  // For now, return null and use fallback
-  return null;
-}
-
-// Fallback function to construct tracking URLs manually
-function getTrackingUrlFallback(carrierCode, trackingNumber) {
-  console.log(`getTrackingUrlFallback called with: carrierCode=${carrierCode}, trackingNumber=${trackingNumber}`);
-  
-  if (!trackingNumber) {
-    console.log('No tracking number provided');
+// Function to generate tracking URLs
+function generateTrackingUrl(carrierCode, trackingNumber) {
+  if (!trackingNumber || !carrierCode) {
     return null;
   }
   
-  const carriers = {
+  const trackingUrls = {
     'ups': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`,
+    'ups_ground': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`,
     'fedex': `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`,
-    'usps': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
-    'dhl': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
-    'stamps_com': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
-    'dhl_express': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
     'fedex_express': `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`,
     'fedex_ground': `https://www.fedex.com/fedextrack/?tracknumbers=${trackingNumber}`,
-    'ups_ground': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`
+    'usps': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
+    'stamps_com': `https://tools.usps.com/go/TrackConfirmAction?tLabels=${trackingNumber}`,
+    'dhl': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
+    'dhl_express': `https://www.dhl.com/en/express/tracking.html?AWB=${trackingNumber}`,
+    'ontrac': `https://www.ontrac.com/tracking/?number=${trackingNumber}`,
+    'lasership': `https://www.lasership.com/track/${trackingNumber}`,
+    'amazon': `https://track.amazon.com/tracking/${trackingNumber}`
   };
   
-  const url = carriers[carrierCode?.toLowerCase()] || null;
-  console.log(`Generated URL: ${url}`);
-  return url;
+  return trackingUrls[carrierCode.toLowerCase()] || null;
 }
 
-// Function to standardize carrier names
-function standardizeCarrierName(carrierCode) {
+// Function to get standardized carrier names
+function getStandardCarrierName(carrierCode) {
+  if (!carrierCode) return 'CARRIER';
+  
   const carrierNames = {
     'ups': 'UPS',
     'ups_ground': 'UPS',
@@ -265,5 +269,5 @@ function standardizeCarrierName(carrierCode) {
     'newgistics': 'Newgistics'
   };
   
-  return carrierNames[carrierCode?.toLowerCase()] || carrierCode?.toUpperCase() || 'CARRIER';
+  return carrierNames[carrierCode.toLowerCase()] || carrierCode.toUpperCase();
 }
