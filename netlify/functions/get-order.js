@@ -107,21 +107,11 @@ exports.handler = async (event, context) => {
             const shipment = shipmentData.shipments[i];
             let trackingUrl = null;
             
-            // Try to get tracking URL from V2 API if we have the key
-            if (v2ApiKey && shipment.trackingNumber) {
-              try {
-                trackingUrl = await getTrackingUrlFromV2(shipment.trackingNumber, v2ApiKey);
-              } catch (v2Error) {
-                console.log('Could not fetch V2 tracking URL:', v2Error.message);
-                // Fallback to manual URL construction
-                trackingUrl = getTrackingUrlFallback(shipment.carrierCode, shipment.trackingNumber);
-              }
-            } else {
-              // Fallback to manual URL construction
+            // Generate tracking URL using fallback method (V2 API doesn't have good order lookup yet)
+            if (shipment.trackingNumber) {
               trackingUrl = getTrackingUrlFallback(shipment.carrierCode, shipment.trackingNumber);
+              console.log(`Generated tracking URL for ${shipment.carrierCode}: ${trackingUrl}`);
             }
-
-            console.log(`Shipment ${i + 1}: Carrier=${shipment.carrierCode}, Tracking=${shipment.trackingNumber}, URL=${trackingUrl}`);
 
             shipments.push({
               shipmentId: shipment.shipmentId,
@@ -134,6 +124,7 @@ exports.handler = async (event, context) => {
               shipmentNumber: i + 1,
               totalShipments: shipmentData.shipments.length
             });
+          }
           }
         }
       } catch (shipmentError) {
@@ -232,7 +223,12 @@ async function getTrackingUrlFromV2(trackingNumber, v2ApiKey) {
 
 // Fallback function to construct tracking URLs manually
 function getTrackingUrlFallback(carrierCode, trackingNumber) {
-  if (!trackingNumber) return null;
+  console.log(`getTrackingUrlFallback called with: carrierCode=${carrierCode}, trackingNumber=${trackingNumber}`);
+  
+  if (!trackingNumber) {
+    console.log('No tracking number provided');
+    return null;
+  }
   
   const carriers = {
     'ups': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`,
@@ -246,7 +242,9 @@ function getTrackingUrlFallback(carrierCode, trackingNumber) {
     'ups_ground': `https://www.ups.com/track?track=yes&trackNums=${trackingNumber}`
   };
   
-  return carriers[carrierCode?.toLowerCase()] || null;
+  const url = carriers[carrierCode?.toLowerCase()] || null;
+  console.log(`Generated URL: ${url}`);
+  return url;
 }
 
 // Function to standardize carrier names
