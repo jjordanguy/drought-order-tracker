@@ -59,12 +59,11 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Get ShipStation API credentials
-    const apiKey = process.env.SHIPSTATION_API_KEY;
-    const apiSecret = process.env.SHIPSTATION_API_SECRET;
+    // Get ShipStation v2 API credentials
+    const apiKey = process.env.SHIPSTATION_PRODUCTION_KEY;
 
-    if (!apiKey || !apiSecret) {
-      console.error('Missing ShipStation API credentials');
+    if (!apiKey) {
+      console.error('Missing ShipStation production key');
       return {
         statusCode: 500,
         headers,
@@ -72,17 +71,14 @@ exports.handler = async (event, context) => {
       };
     }
 
-    // Create auth header for ShipStation
-    const auth = Buffer.from(`${apiKey}:${apiSecret}`).toString('base64');
-    
-    // Search for order by number and email
+    // Search for order by number and email using v2 API
     const searchParams = new URLSearchParams({
       orderNumber: orderNumber.trim(),
       customerEmail: email.trim().toLowerCase()
     });
 
-    // Call ShipStation API
-    const orderData = await makeShipStationRequest(`/orders?${searchParams}`, auth);
+    // Call ShipStation v2 API for orders
+    const orderData = await makeShipStationV2Request(`/orders?${searchParams}`, apiKey);
 
     if (!orderData.orders || orderData.orders.length === 0) {
       return {
@@ -95,18 +91,13 @@ exports.handler = async (event, context) => {
     // Get the matching order
     const order = orderData.orders[0];
 
-    // Get tracking information if order is shipped
-    let trackingInfo = null;
+    // Get all shipments for this order using v2 API
+    let shipments = [];
     if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered') {
       try {
-        const shipmentData = await makeShipStationRequest(`/shipments?orderNumber=${orderNumber.trim()}`, auth);
+        const shipmentData = await makeShipStationV2Request(`/shipments?orderNumber=${orderNumber.trim()}`, apiKey);
         if (shipmentData.shipments && shipmentData.shipments.length > 0) {
-          const shipment = shipmentData.shipments[0];
-          trackingInfo = {
-            trackingNumber: shipment.trackingNumber,
-            carrierCode: shipment.carrierCode,
-            shipDate: shipment.shipDate
-          };
+          shipments = shipmentData.shipments;
         }
       } catch (shipmentError) {
         console.log('Could not fetch shipment info:', shipmentError.message);
@@ -120,10 +111,16 @@ exports.handler = async (event, context) => {
       customerEmail: order.customerEmail,
       orderDate: order.orderDate,
       orderStatus: order.orderStatus.toLowerCase(),
-      trackingNumber: trackingInfo?.trackingNumber || null,
-      carrierCode: trackingInfo?.carrierCode || null,
-      shipDate: trackingInfo?.shipDate || null,
-      deliveryDate: null // ShipStation doesn't provide delivery confirmation
+      shipments: shipments.map((shipment, index) => ({
+        shipmentId: shipment.shipmentId,
+        trackingNumber: shipment.trackingNumber,
+        trackingUrl: shipment.trackingUrl, // v2 API provides this directly
+        carrierCode: shipment.carrierCode,
+        shipDate: shipment.shipDate,
+        deliveryDate: shipment.deliveryDate || null,
+        shipmentNumber: index + 1,
+        totalShipments: shipments.length
+      }))
     };
 
     return {
@@ -144,19 +141,19 @@ exports.handler = async (event, context) => {
   }
 };
 
-// Helper function to make ShipStation API requests
-function makeShipStationRequest(endpoint, auth) {
+// Helper function to make ShipStation v2 API requests
+function makeShipStationV2Request(endpoint, apiKey) {
   return new Promise((resolve, reject) => {
     const https = require('https');
     
     const options = {
-      hostname: 'ssapi.shipstation.com',
-      path: endpoint,
+      hostname: 'api.shipstation.com',
+      path: `/v2${endpoint}`,
       method: 'GET',
       headers: {
-        'Authorization': `Basic ${auth}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'Drought-Order-Tracker/1.0'
+        'User-Agent': 'Drought-Order-Tracker/2.0'
       }
     };
 
@@ -177,7 +174,7 @@ function makeShipStationRequest(endpoint, auth) {
         } else if (res.statusCode === 401) {
           reject(new Error('Invalid ShipStation API credentials'));
         } else if (res.statusCode === 404) {
-          resolve({ orders: [] }); // No orders found
+          resolve({ orders: [], shipments: [] }); // No data found
         } else {
           reject(new Error(`ShipStation API error: ${res.statusCode}`));
         }
@@ -188,8 +185,8 @@ function makeShipStationRequest(endpoint, auth) {
       reject(new Error(`Network error: ${error.message}`));
     });
 
-    // Set 10 second timeout
-    req.setTimeout(10000, () => {
+    // Set 15 second timeout
+    req.setTimeout(15000, () => {
       req.destroy();
       reject(new Error('Request timeout'));
     });
