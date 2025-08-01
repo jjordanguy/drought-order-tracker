@@ -95,8 +95,12 @@ exports.handler = async (event, context) => {
 
     // Get 17track API key
     const seventeenTrackKey = process.env.SEVENTEEN_TRACK_API_KEY;
+    console.log('17track API Key configured:', seventeenTrackKey ? 'YES' : 'NO');
     if (!seventeenTrackKey) {
-      console.error('Missing 17track API key');
+      console.error('Missing 17track API key - tracking verification will be skipped');
+    } else {
+      console.log('17track API Key length:', seventeenTrackKey.length);
+      console.log('17track API Key prefix:', seventeenTrackKey.substring(0, 3) + '***');
     }
 
     // Create auth header for ShipStation V1
@@ -167,10 +171,17 @@ exports.handler = async (event, context) => {
           
           // If 17track is available, verify shipments
           if (seventeenTrackKey) {
+            console.log('=== Starting 17track verification ===');
+            console.log(`Total shipments to verify: ${shipmentData.shipments.length}`);
+            
             const verifiedShipments = await verifyShipmentsWithSeventeenTrack(
               shipmentData.shipments, 
               seventeenTrackKey
             );
+            
+            console.log('=== 17track verification complete ===');
+            console.log(`Shipments actually shipped: ${verifiedShipments.filter(s => s.actuallyShipped).length}`);
+            console.log(`Shipments not yet shipped: ${verifiedShipments.filter(s => !s.actuallyShipped).length}`);
             
             // Only include shipments that have actually been shipped according to 17track
             verifiedShipments.forEach((shipment, index) => {
@@ -236,13 +247,27 @@ exports.handler = async (event, context) => {
       console.log(`Order status is '${order.orderStatus}', not checking for shipments`);
     }
 
+    console.log('\n=== SHIPMENT SUMMARY ===');
+    console.log(`Order status from ShipStation: ${order.orderStatus}`);
+    console.log(`Total shipments found: ${totalShipmentCount}`);
+    console.log(`Shipments verified as shipped: ${actuallyShippedCount}`);
+    console.log(`Final shipments array length: ${shipments.length}`);
+
     // Determine effective order status based on 17track verification
     let effectiveOrderStatus = order.orderStatus;
     
     // If ShipStation says shipped but nothing has actually shipped per 17track, keep it in processing
     if (seventeenTrackKey && order.orderStatus === 'shipped' && actuallyShippedCount === 0 && totalShipmentCount > 0) {
-      console.log('Order marked as shipped in ShipStation but no shipments verified by 17track - treating as processing');
+      console.log('=== STATUS OVERRIDE ===');
+      console.log('Order marked as shipped in ShipStation but no shipments verified by 17track');
+      console.log(`Original status: ${order.orderStatus} → New status: awaiting_fulfillment`);
       effectiveOrderStatus = 'awaiting_fulfillment';
+    } else {
+      console.log('=== ORDER STATUS ===');
+      console.log(`ShipStation status: ${order.orderStatus}`);
+      console.log(`Effective status: ${effectiveOrderStatus}`);
+      console.log(`Total shipments: ${totalShipmentCount}`);
+      console.log(`Actually shipped: ${actuallyShippedCount}`);
     }
 
     // Format response for frontend
@@ -342,7 +367,9 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
           };
         }
         
-        console.log(`Tracking ${shipment.trackingNumber}: hasEvents=${hasTrackingEvents}, status=${statusCode}, shipped=${actuallyShipped}`);
+        console.log(`Tracking ${shipment.trackingNumber}: hasEvents=${hasTrackingEvents}, status=${statusCode}, shipped=${actuallyShipped}, delivered=${isDelivered}`);
+      } else {
+        console.log(`No tracking info found for ${shipment.trackingNumber} in 17track response`);
       }
       
       verifiedShipments.push({
@@ -387,6 +414,15 @@ function makeSeventeenTrackRequest(endpoint, data, apiKey) {
       }
     };
     
+    console.log(`\nMaking 17track API request:`);
+    console.log(`URL: https://${options.hostname}${options.path}`);
+    console.log(`Headers:`, {
+      'Content-Type': options.headers['Content-Type'],
+      'Content-Length': options.headers['Content-Length'],
+      '17token': apiKey.substring(0, 3) + '***' + apiKey.substring(apiKey.length - 3)
+    });
+    console.log(`Body:`, postData);
+    
     const req = https.request(options, (res) => {
       let data = '';
       
@@ -395,26 +431,33 @@ function makeSeventeenTrackRequest(endpoint, data, apiKey) {
       });
       
       res.on('end', () => {
+        console.log(`17track API response status: ${res.statusCode}`);
+        console.log(`17track API response headers:`, res.headers);
+        
         if (res.statusCode === 200) {
           try {
             const parsedData = JSON.parse(data);
+            console.log(`17track API response body:`, JSON.stringify(parsedData, null, 2));
             resolve(parsedData);
           } catch (parseError) {
+            console.error('Failed to parse 17track response:', data);
             reject(new Error('Invalid response from 17track'));
           }
         } else {
           console.error(`17track API error ${res.statusCode}:`, data);
-          reject(new Error(`17track API error: ${res.statusCode}`));
+          reject(new Error(`17track API error: ${res.statusCode} - ${data}`));
         }
       });
     });
     
     req.on('error', (error) => {
+      console.error('17track request error:', error);
       reject(error);
     });
     
     req.setTimeout(10000, () => {
       req.destroy();
+      console.error('17track request timeout');
       reject(new Error('17track request timeout'));
     });
     
@@ -441,7 +484,11 @@ function mapCarrierToSeventeenTrack(shipstationCarrier) {
     'newgistics': '190269'
   };
   
-  return carrierMapping[shipstationCarrier.toLowerCase()] || '0';
+  const mapped = carrierMapping[shipstationCarrier.toLowerCase()] || '0';
+  if (mapped === '0') {
+    console.warn(`Unknown carrier code: ${shipstationCarrier} - using auto-detect (0)`);
+  }
+  return mapped;
 }
 
 // Helper function to make ShipStation V1 API requests
