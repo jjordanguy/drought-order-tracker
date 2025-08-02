@@ -153,25 +153,54 @@ exports.handler = async (event, context) => {
 
     // Use the exact match
     const order = exactMatch;
-    console.log(`Found order: ${order.orderNumber} with status: ${order.orderStatus}`);
+    console.log(`\n=== ORDER FOUND ===`);
+    console.log(`Order Number: ${order.orderNumber}`);
+    console.log(`Order Status: ${order.orderStatus}`);
+    console.log(`Order Date: ${order.orderDate}`);
+    console.log(`Customer Email: ${order.customerEmail}`);
+    console.log(`Raw Order Object:`, JSON.stringify(order, null, 2));
 
-    // Get tracking information for any order that has shipping activity
+    // Get tracking information - ALWAYS CHECK FOR SHIPMENTS REGARDLESS OF STATUS
     let shipments = [];
     let actuallyShippedCount = 0;
     let totalShipmentCount = 0;
     
-    if (order.orderStatus === 'shipped' || order.orderStatus === 'delivered' || order.orderStatus === 'awaiting_shipment') {
+    console.log(`\n=== CHECKING FOR SHIPMENTS ===`);
+    console.log(`Order status: '${order.orderStatus}'`);
+    
+    // MODIFIED: Check for shipments regardless of order status for debugging
+    const shouldCheckShipments = true; // Always check for debugging
+    
+    if (shouldCheckShipments) {
+      console.log(`✅ Will check for shipments (status: ${order.orderStatus})`);
+      
       try {
         console.log(`Fetching shipments for order: ${cleanOrderNumber}`);
         const shipmentData = await makeShipStationRequest(`/shipments?orderNumber=${cleanOrderNumber}`, auth);
+        
+        console.log(`\n=== SHIPSTATION SHIPMENTS RESPONSE ===`);
+        console.log(`Shipments found: ${shipmentData.shipments ? shipmentData.shipments.length : 0}`);
+        console.log(`Raw shipment data:`, JSON.stringify(shipmentData, null, 2));
         
         if (shipmentData.shipments && shipmentData.shipments.length > 0) {
           console.log(`Found ${shipmentData.shipments.length} shipments`);
           totalShipmentCount = shipmentData.shipments.length;
           
+          // Log each shipment's details
+          shipmentData.shipments.forEach((shipment, index) => {
+            console.log(`\n--- Shipment ${index + 1} ---`);
+            console.log(`Shipment ID: ${shipment.shipmentId}`);
+            console.log(`Tracking Number: ${shipment.trackingNumber}`);
+            console.log(`Carrier Code: ${shipment.carrierCode}`);
+            console.log(`Ship Date: ${shipment.shipDate}`);
+            console.log(`Delivery Date: ${shipment.deliveryDate}`);
+            console.log(`Void Date: ${shipment.voidDate}`);
+            console.log(`Items:`, shipment.shipmentItems ? shipment.shipmentItems.length : 0);
+          });
+          
           // If 17track is available, verify shipments
           if (seventeenTrackKey) {
-            console.log('=== Starting 17track verification ===');
+            console.log('\n=== Starting 17track verification ===');
             console.log(`Total shipments to verify: ${shipmentData.shipments.length}`);
             
             const verifiedShipments = await verifyShipmentsWithSeventeenTrack(
@@ -179,32 +208,37 @@ exports.handler = async (event, context) => {
               seventeenTrackKey
             );
             
-            console.log('=== 17track verification complete ===');
+            console.log('\n=== 17track verification results ===');
+            verifiedShipments.forEach((shipment, index) => {
+              console.log(`Shipment ${index + 1}: actuallyShipped=${shipment.actuallyShipped}, status=${shipment.seventeenTrackStatus}`);
+            });
+            
             console.log(`Shipments actually shipped: ${verifiedShipments.filter(s => s.actuallyShipped).length}`);
             console.log(`Shipments not yet shipped: ${verifiedShipments.filter(s => !s.actuallyShipped).length}`);
             
-            // Only include shipments that have actually been shipped according to 17track
+            // Include ALL shipments for debugging (not just actually shipped ones)
             verifiedShipments.forEach((shipment, index) => {
-              if (shipment.actuallyShipped) {
-                actuallyShippedCount++;
-                const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
-                const carrierName = getStandardCarrierName(shipment.carrierCode);
-                
-                shipments.push({
-                  shipmentId: shipment.shipmentId,
-                  trackingNumber: shipment.trackingNumber,
-                  trackingUrl: trackingUrl,
-                  carrierCode: shipment.carrierCode,
-                  carrierName: carrierName,
-                  shipDate: shipment.shipDate,
-                  deliveryDate: shipment.deliveryDate || null,
-                  isDelivered: shipment.isDelivered,
-                  shipmentNumber: actuallyShippedCount,
-                  totalShipments: actuallyShippedCount, // Will be updated after loop
-                  latestActivity: shipment.latestActivity || null,
-                  items: shipment.shipmentItems || []
-                });
-              }
+              actuallyShippedCount++;
+              const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
+              const carrierName = getStandardCarrierName(shipment.carrierCode);
+              
+              shipments.push({
+                shipmentId: shipment.shipmentId,
+                trackingNumber: shipment.trackingNumber,
+                trackingUrl: trackingUrl,
+                carrierCode: shipment.carrierCode,
+                carrierName: carrierName,
+                shipDate: shipment.shipDate,
+                deliveryDate: shipment.deliveryDate || null,
+                isDelivered: shipment.isDelivered,
+                shipmentNumber: actuallyShippedCount,
+                totalShipments: actuallyShippedCount,
+                latestActivity: shipment.latestActivity || null,
+                items: shipment.shipmentItems || [],
+                // Debug fields
+                actuallyShipped: shipment.actuallyShipped,
+                seventeenTrackStatus: shipment.seventeenTrackStatus
+              });
             });
             
             // Update total shipments count for display
@@ -237,38 +271,28 @@ exports.handler = async (event, context) => {
             });
           }
         } else {
-          console.log('No shipments found for this order');
+          console.log('❌ No shipments found for this order in ShipStation');
         }
       } catch (shipmentError) {
-        console.log('Could not fetch shipment info:', shipmentError.message);
+        console.log('❌ Error fetching shipment info:', shipmentError.message);
+        console.log('Full error:', shipmentError);
         // Continue without tracking info rather than failing
       }
     } else {
-      console.log(`Order status is '${order.orderStatus}', not checking for shipments`);
+      console.log(`❌ Skipping shipment check due to order status: '${order.orderStatus}'`);
     }
 
-    console.log('\n=== SHIPMENT SUMMARY ===');
+    console.log('\n=== FINAL SHIPMENT SUMMARY ===');
     console.log(`Order status from ShipStation: ${order.orderStatus}`);
     console.log(`Total shipments found: ${totalShipmentCount}`);
-    console.log(`Shipments verified as shipped: ${actuallyShippedCount}`);
-    console.log(`Final shipments array length: ${shipments.length}`);
+    console.log(`Shipments in final array: ${shipments.length}`);
+    console.log(`Final shipments array:`, JSON.stringify(shipments, null, 2));
 
-    // Determine effective order status based on 17track verification
-    let effectiveOrderStatus = order.orderStatus;
+    // For debugging, don't override status - keep original
+    const effectiveOrderStatus = order.orderStatus;
     
-    // If ShipStation says shipped but nothing has actually shipped per 17track, keep it in processing
-    if (seventeenTrackKey && order.orderStatus === 'shipped' && actuallyShippedCount === 0 && totalShipmentCount > 0) {
-      console.log('=== STATUS OVERRIDE ===');
-      console.log('Order marked as shipped in ShipStation but no shipments verified by 17track');
-      console.log(`Original status: ${order.orderStatus} → New status: awaiting_fulfillment`);
-      effectiveOrderStatus = 'awaiting_fulfillment';
-    } else {
-      console.log('=== ORDER STATUS ===');
-      console.log(`ShipStation status: ${order.orderStatus}`);
-      console.log(`Effective status: ${effectiveOrderStatus}`);
-      console.log(`Total shipments: ${totalShipmentCount}`);
-      console.log(`Actually shipped: ${actuallyShippedCount}`);
-    }
+    console.log('\n=== FINAL RESPONSE PREPARATION ===');
+    console.log(`Effective order status: ${effectiveOrderStatus}`);
 
     // Format response for frontend
     const response = {
@@ -276,10 +300,18 @@ exports.handler = async (event, context) => {
       customerEmail: order.customerEmail,
       orderDate: order.orderDate,
       orderStatus: effectiveOrderStatus.toLowerCase(),
-      shipments: shipments
+      shipments: shipments,
+      // Debug info
+      debug: {
+        originalOrderStatus: order.orderStatus,
+        totalShipmentsFound: totalShipmentCount,
+        shipmentsInResponse: shipments.length,
+        seventeenTrackEnabled: !!seventeenTrackKey
+      }
     };
 
-    console.log('Sending response:', JSON.stringify(response, null, 2));
+    console.log('\n=== SENDING RESPONSE ===');
+    console.log('Response object:', JSON.stringify(response, null, 2));
 
     return {
       statusCode: 200,
@@ -299,13 +331,18 @@ exports.handler = async (event, context) => {
   }
 };
 
-// Helper function to verify shipments with 17track - WITH PROPER POLLING
+// Helper function to verify shipments with 17track - WITH ENHANCED DEBUGGING
 async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
   const verifiedShipments = [];
   
+  console.log(`\n=== 17TRACK VERIFICATION START ===`);
+  console.log(`Processing ${shipments.length} shipments`);
+  
   for (const shipment of shipments) {
+    console.log(`\n--- Processing shipment: ${shipment.trackingNumber} ---`);
+    
     if (!shipment.trackingNumber) {
-      console.log(`Shipment ${shipment.shipmentId} has no tracking number, skipping`);
+      console.log(`❌ Shipment ${shipment.shipmentId} has no tracking number, skipping`);
       verifiedShipments.push({
         ...shipment,
         actuallyShipped: false,
@@ -316,39 +353,42 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
     }
     
     try {
-      console.log(`Processing tracking ${shipment.trackingNumber} with 17track`);
+      console.log(`🔍 Processing tracking ${shipment.trackingNumber} with 17track`);
       
       // First, try to get existing tracking info (in case it's already tracked)
       let trackingData = await makeSeventeenTrackRequest('/gettrackinfo', [{
         number: shipment.trackingNumber
       }], apiKey);
       
-      console.log(`Initial 17track response for ${shipment.trackingNumber}:`, JSON.stringify(trackingData, null, 2));
+      console.log(`📥 Initial 17track response for ${shipment.trackingNumber}:`);
+      console.log(JSON.stringify(trackingData, null, 2));
       
       // Check if we got valid tracking data
       let trackInfo = trackingData.data && trackingData.data.accepted && trackingData.data.accepted[0];
       
       // If no data or no tracking events, try to register and wait
       if (!trackInfo || !trackInfo.track || !trackInfo.track.z0 || trackInfo.track.z0.length === 0) {
-        console.log(`No existing tracking data for ${shipment.trackingNumber}, registering...`);
+        console.log(`⏳ No existing tracking data for ${shipment.trackingNumber}, registering...`);
         
         // Register the tracking number
-        await makeSeventeenTrackRequest('/register', [{
+        const registerResponse = await makeSeventeenTrackRequest('/register', [{
           number: shipment.trackingNumber
         }], apiKey);
         
-        console.log(`Registered ${shipment.trackingNumber}, waiting for data...`);
+        console.log(`📝 Register response:`, JSON.stringify(registerResponse, null, 2));
+        console.log(`⌛ Registered ${shipment.trackingNumber}, waiting for data...`);
         
         // Wait and retry to get tracking info (with polling)
         let attempts = 0;
         const maxAttempts = 3;
-        const waitTime = 2000; // 2 seconds between attempts
+        const waitTime = 3000; // 3 seconds between attempts
         
         while (attempts < maxAttempts) {
-          console.log(`Attempt ${attempts + 1}/${maxAttempts} to get tracking data for ${shipment.trackingNumber}`);
+          console.log(`🔄 Attempt ${attempts + 1}/${maxAttempts} to get tracking data for ${shipment.trackingNumber}`);
           
           // Wait before retry
           if (attempts > 0) {
+            console.log(`⏱️ Waiting ${waitTime}ms before retry...`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
           }
           
@@ -356,16 +396,22 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
             number: shipment.trackingNumber
           }], apiKey);
           
+          console.log(`📥 Attempt ${attempts + 1} response:`, JSON.stringify(trackingData, null, 2));
+          
           trackInfo = trackingData.data && trackingData.data.accepted && trackingData.data.accepted[0];
           
           // Check if we now have tracking events
           if (trackInfo && trackInfo.track && trackInfo.track.z0 && trackInfo.track.z0.length > 0) {
-            console.log(`Got tracking data for ${shipment.trackingNumber} on attempt ${attempts + 1}`);
+            console.log(`✅ Got tracking data for ${shipment.trackingNumber} on attempt ${attempts + 1}`);
             break;
+          } else {
+            console.log(`❌ No tracking data yet for ${shipment.trackingNumber} on attempt ${attempts + 1}`);
           }
           
           attempts++;
         }
+      } else {
+        console.log(`✅ Found existing tracking data for ${shipment.trackingNumber}`);
       }
       
       // Process the tracking data
@@ -373,13 +419,25 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
       let isDelivered = false;
       let latestActivity = null;
       
+      console.log(`\n🔍 Analyzing tracking data for ${shipment.trackingNumber}:`);
+      
       if (trackInfo && trackInfo.track) {
+        console.log(`📊 Track info found. Status code: ${trackInfo.track.e}`);
+        console.log(`📊 Events count: ${trackInfo.track.z0 ? trackInfo.track.z0.length : 0}`);
+        
         // Check track status - if there are any tracking events, it's been received by carrier
         const hasTrackingEvents = trackInfo.track.z0 && trackInfo.track.z0.length > 0;
         
+        if (hasTrackingEvents) {
+          console.log(`📋 Tracking events found:`);
+          trackInfo.track.z0.forEach((event, index) => {
+            console.log(`  Event ${index + 1}: ${event.z} | ${event.c} | ${event.a}`);
+          });
+        }
+        
         // Check if status indicates it's been picked up
         const statusCode = trackInfo.track.e;
-        // Status codes: 0=Not Found, 10=In Transit, 20=Expired, 30=Pickup, 35=Undelivered, 40=Delivered, 50=Alert
+        console.log(`📈 Status code analysis: ${statusCode}`);
         
         // More lenient check - if there are any tracking events beyond just label creation
         if (hasTrackingEvents) {
@@ -387,20 +445,27 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
           const trackingEvents = trackInfo.track.z0;
           const hasMovementEvents = trackingEvents.some(event => {
             const eventText = (event.z || '').toLowerCase();
-            return eventText.includes('picked up') || 
+            const isMovement = eventText.includes('picked up') || 
                    eventText.includes('in transit') || 
                    eventText.includes('out for delivery') ||
                    eventText.includes('delivered') ||
                    eventText.includes('departed') ||
                    eventText.includes('arrived') ||
                    statusCode >= 10;
+            
+            console.log(`  🔍 Event analysis: "${eventText}" → movement: ${isMovement}`);
+            return isMovement;
           });
           
           actuallyShipped = hasMovementEvents || statusCode >= 10;
+          console.log(`📦 Actually shipped determination: ${actuallyShipped} (hasMovement: ${hasMovementEvents}, status: ${statusCode})`);
+        } else {
+          console.log(`📦 No tracking events found - not shipped`);
         }
         
         // Check if delivered
         isDelivered = statusCode === 40;
+        console.log(`🏠 Delivered status: ${isDelivered}`);
         
         // Get latest tracking activity
         if (hasTrackingEvents && trackInfo.track.z0.length > 0) {
@@ -411,12 +476,17 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
             time: latestEvent.a || '',
             description: latestEvent.z || ''
           };
+          console.log(`📍 Latest activity:`, latestActivity);
         }
         
-        console.log(`Final result for ${shipment.trackingNumber}: hasEvents=${hasTrackingEvents}, status=${statusCode}, shipped=${actuallyShipped}, delivered=${isDelivered}`);
       } else {
-        console.log(`No tracking info found for ${shipment.trackingNumber} after all attempts`);
+        console.log(`❌ No tracking info found for ${shipment.trackingNumber} after all attempts`);
       }
+      
+      console.log(`\n✅ Final verification result for ${shipment.trackingNumber}:`);
+      console.log(`   - Actually shipped: ${actuallyShipped}`);
+      console.log(`   - Is delivered: ${isDelivered}`);
+      console.log(`   - Has activity: ${!!latestActivity}`);
       
       verifiedShipments.push({
         ...shipment,
@@ -427,7 +497,9 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
       });
       
     } catch (error) {
-      console.error(`Failed to verify tracking ${shipment.trackingNumber} with 17track:`, error.message);
+      console.error(`❌ Failed to verify tracking ${shipment.trackingNumber} with 17track:`, error.message);
+      console.error(`Full error:`, error);
+      
       // If 17track fails, fall back to ShipStation data
       verifiedShipments.push({
         ...shipment,
@@ -439,6 +511,7 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
     }
   }
   
+  console.log(`\n=== 17TRACK VERIFICATION COMPLETE ===`);
   return verifiedShipments;
 }
 
@@ -460,7 +533,7 @@ function makeSeventeenTrackRequest(endpoint, data, apiKey) {
       }
     };
     
-    console.log(`\nMaking 17track API request:`);
+    console.log(`\n🌐 Making 17track API request:`);
     console.log(`URL: https://${options.hostname}${options.path}`);
     console.log(`Headers:`, {
       'Content-Type': options.headers['Content-Type'],
@@ -477,33 +550,33 @@ function makeSeventeenTrackRequest(endpoint, data, apiKey) {
       });
       
       res.on('end', () => {
-        console.log(`17track API response status: ${res.statusCode}`);
-        console.log(`17track API response headers:`, res.headers);
+        console.log(`📥 17track API response status: ${res.statusCode}`);
+        console.log(`📥 17track API response headers:`, res.headers);
         
         if (res.statusCode === 200) {
           try {
             const parsedData = JSON.parse(data);
-            console.log(`17track API response body:`, JSON.stringify(parsedData, null, 2));
+            console.log(`📥 17track API response body:`, JSON.stringify(parsedData, null, 2));
             resolve(parsedData);
           } catch (parseError) {
-            console.error('Failed to parse 17track response:', data);
+            console.error('❌ Failed to parse 17track response:', data);
             reject(new Error('Invalid response from 17track'));
           }
         } else {
-          console.error(`17track API error ${res.statusCode}:`, data);
+          console.error(`❌ 17track API error ${res.statusCode}:`, data);
           reject(new Error(`17track API error: ${res.statusCode} - ${data}`));
         }
       });
     });
     
     req.on('error', (error) => {
-      console.error('17track request error:', error);
+      console.error('❌ 17track request error:', error);
       reject(error);
     });
     
-    req.setTimeout(10000, () => {
+    req.setTimeout(15000, () => {
       req.destroy();
-      console.error('17track request timeout');
+      console.error('⏰ 17track request timeout');
       reject(new Error('17track request timeout'));
     });
     
@@ -528,7 +601,7 @@ function makeShipStationRequest(endpoint, auth) {
       }
     };
 
-    console.log(`Making request to: https://ssapi.shipstation.com${endpoint}`);
+    console.log(`🌐 Making request to: https://ssapi.shipstation.com${endpoint}`);
 
     const req = https.request(options, (res) => {
       let data = '';
@@ -538,37 +611,37 @@ function makeShipStationRequest(endpoint, auth) {
       });
 
       res.on('end', () => {
-        console.log(`API Response Status: ${res.statusCode}`);
+        console.log(`📥 ShipStation API Response Status: ${res.statusCode}`);
         
         if (res.statusCode === 200) {
           try {
             const parsedData = JSON.parse(data);
             resolve(parsedData);
           } catch (parseError) {
-            console.error('JSON parse error:', parseError);
+            console.error('❌ JSON parse error:', parseError);
             reject(new Error('Invalid response from ShipStation'));
           }
         } else if (res.statusCode === 401) {
-          console.error('Authentication failed - check API credentials');
+          console.error('❌ Authentication failed - check API credentials');
           reject(new Error('Invalid ShipStation API credentials'));
         } else if (res.statusCode === 403) {
-          console.error('Access forbidden - check API permissions');
+          console.error('❌ Access forbidden - check API permissions');
           reject(new Error('Access denied by ShipStation API'));
         } else if (res.statusCode === 404) {
-          console.log('No data found for request');
+          console.log('ℹ️ No data found for request');
           resolve({ orders: [], shipments: [] }); // No data found
         } else if (res.statusCode === 429) {
-          console.error('Rate limit exceeded');
+          console.error('❌ Rate limit exceeded');
           reject(new Error('Too many requests - please try again later'));
         } else {
-          console.error(`API Error ${res.statusCode}:`, data);
+          console.error(`❌ API Error ${res.statusCode}:`, data);
           reject(new Error(`ShipStation API error: ${res.statusCode}`));
         }
       });
     });
 
     req.on('error', (error) => {
-      console.error('Request error:', error);
+      console.error('❌ Request error:', error);
       reject(new Error(`Network error: ${error.message}`));
     });
 
