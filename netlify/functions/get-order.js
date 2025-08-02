@@ -299,9 +299,8 @@ exports.handler = async (event, context) => {
   }
 };
 
-// Helper function to verify shipments with 17track - MODIFIED FOR AUTO-DETECTION
+// Helper function to verify shipments with 17track - WITH PROPER POLLING
 async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
-  const https = require('https');
   const verifiedShipments = [];
   
   for (const shipment of shipments) {
@@ -317,30 +316,61 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
     }
     
     try {
-      // Use auto-detection by omitting carrier or using '0'
-      const registerData = [{
+      console.log(`Processing tracking ${shipment.trackingNumber} with 17track`);
+      
+      // First, try to get existing tracking info (in case it's already tracked)
+      let trackingData = await makeSeventeenTrackRequest('/gettrackinfo', [{
         number: shipment.trackingNumber
-        // Removed carrier field entirely for auto-detection
-      }];
-      
-      console.log(`Registering tracking ${shipment.trackingNumber} with 17track (auto-detect)`);
-      
-      // Register tracking number
-      await makeSeventeenTrackRequest('/register', registerData, apiKey);
-      
-      // Get tracking info - also use auto-detection
-      const trackingData = await makeSeventeenTrackRequest('/gettrackinfo', [{
-        number: shipment.trackingNumber
-        // Removed carrier field entirely for auto-detection
       }], apiKey);
       
-      console.log(`17track response for ${shipment.trackingNumber}:`, JSON.stringify(trackingData, null, 2));
+      console.log(`Initial 17track response for ${shipment.trackingNumber}:`, JSON.stringify(trackingData, null, 2));
       
-      // Check if package has been received by carrier
-      const trackInfo = trackingData.data && trackingData.data.accepted && trackingData.data.accepted[0];
+      // Check if we got valid tracking data
+      let trackInfo = trackingData.data && trackingData.data.accepted && trackingData.data.accepted[0];
+      
+      // If no data or no tracking events, try to register and wait
+      if (!trackInfo || !trackInfo.track || !trackInfo.track.z0 || trackInfo.track.z0.length === 0) {
+        console.log(`No existing tracking data for ${shipment.trackingNumber}, registering...`);
+        
+        // Register the tracking number
+        await makeSeventeenTrackRequest('/register', [{
+          number: shipment.trackingNumber
+        }], apiKey);
+        
+        console.log(`Registered ${shipment.trackingNumber}, waiting for data...`);
+        
+        // Wait and retry to get tracking info (with polling)
+        let attempts = 0;
+        const maxAttempts = 3;
+        const waitTime = 2000; // 2 seconds between attempts
+        
+        while (attempts < maxAttempts) {
+          console.log(`Attempt ${attempts + 1}/${maxAttempts} to get tracking data for ${shipment.trackingNumber}`);
+          
+          // Wait before retry
+          if (attempts > 0) {
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+          }
+          
+          trackingData = await makeSeventeenTrackRequest('/gettrackinfo', [{
+            number: shipment.trackingNumber
+          }], apiKey);
+          
+          trackInfo = trackingData.data && trackingData.data.accepted && trackingData.data.accepted[0];
+          
+          // Check if we now have tracking events
+          if (trackInfo && trackInfo.track && trackInfo.track.z0 && trackInfo.track.z0.length > 0) {
+            console.log(`Got tracking data for ${shipment.trackingNumber} on attempt ${attempts + 1}`);
+            break;
+          }
+          
+          attempts++;
+        }
+      }
+      
+      // Process the tracking data
       let actuallyShipped = false;
       let isDelivered = false;
-      
       let latestActivity = null;
       
       if (trackInfo && trackInfo.track) {
@@ -350,7 +380,24 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
         // Check if status indicates it's been picked up
         const statusCode = trackInfo.track.e;
         // Status codes: 0=Not Found, 10=In Transit, 20=Expired, 30=Pickup, 35=Undelivered, 40=Delivered, 50=Alert
-        actuallyShipped = hasTrackingEvents && statusCode >= 10;
+        
+        // More lenient check - if there are any tracking events beyond just label creation
+        if (hasTrackingEvents) {
+          // Look for events that indicate actual movement
+          const trackingEvents = trackInfo.track.z0;
+          const hasMovementEvents = trackingEvents.some(event => {
+            const eventText = (event.z || '').toLowerCase();
+            return eventText.includes('picked up') || 
+                   eventText.includes('in transit') || 
+                   eventText.includes('out for delivery') ||
+                   eventText.includes('delivered') ||
+                   eventText.includes('departed') ||
+                   eventText.includes('arrived') ||
+                   statusCode >= 10;
+          });
+          
+          actuallyShipped = hasMovementEvents || statusCode >= 10;
+        }
         
         // Check if delivered
         isDelivered = statusCode === 40;
@@ -366,9 +413,9 @@ async function verifyShipmentsWithSeventeenTrack(shipments, apiKey) {
           };
         }
         
-        console.log(`Tracking ${shipment.trackingNumber}: hasEvents=${hasTrackingEvents}, status=${statusCode}, shipped=${actuallyShipped}, delivered=${isDelivered}`);
+        console.log(`Final result for ${shipment.trackingNumber}: hasEvents=${hasTrackingEvents}, status=${statusCode}, shipped=${actuallyShipped}, delivered=${isDelivered}`);
       } else {
-        console.log(`No tracking info found for ${shipment.trackingNumber} in 17track response`);
+        console.log(`No tracking info found for ${shipment.trackingNumber} after all attempts`);
       }
       
       verifiedShipments.push({
@@ -464,8 +511,6 @@ function makeSeventeenTrackRequest(endpoint, data, apiKey) {
     req.end();
   });
 }
-
-// Removed the mapCarrierToSeventeenTrack function since we're using auto-detection
 
 // Helper function to make ShipStation V1 API requests
 function makeShipStationRequest(endpoint, auth) {
