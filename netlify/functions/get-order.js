@@ -224,10 +224,24 @@ exports.handler = async (event, context) => {
             console.log('Falling back to ShipStation data only');
             
             // Fallback to ShipStation data
+            let hasDeliveredShipments = false;
+            let hasInTransitShipments = false;
+            let hasActuallyShippedShipments = false;
+            
             shipmentData.shipments.forEach((shipment, index) => {
               const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
               const carrierName = getStandardCarrierName(shipment.carrierCode);
               const isDelivered = checkShipmentDeliveryStatus(shipment);
+              // In fallback mode, assume shipped if there's a tracking number
+              const actuallyShipped = shipment.trackingNumber ? true : false;
+              
+              // Update status tracking
+              if (isDelivered) {
+                hasDeliveredShipments = true;
+              } else if (actuallyShipped) {
+                hasInTransitShipments = true;
+                hasActuallyShippedShipments = true;
+              }
               
               shipments.push({
                 shipmentId: shipment.shipmentId,
@@ -238,21 +252,51 @@ exports.handler = async (event, context) => {
                 shipDate: shipment.shipDate,
                 deliveryDate: shipment.deliveryDate || null,
                 isDelivered: isDelivered,
+                actuallyShipped: actuallyShipped,
                 shipmentNumber: index + 1,
                 totalShipments: shipmentData.shipments.length,
                 items: shipment.shipmentItems || []
               });
             });
+            
+            // Determine overall order status based on fallback data
+            if (hasDeliveredShipments && shipmentData.shipments.every(s => checkShipmentDeliveryStatus(s))) {
+              effectiveOrderStatus = 'delivered';
+              console.log('📦 All shipments delivered (fallback data)');
+            } else if (hasDeliveredShipments) {
+              effectiveOrderStatus = 'partially_delivered';
+              console.log('📦 Some shipments delivered (fallback data)');
+            } else if (hasInTransitShipments) {
+              effectiveOrderStatus = 'shipped';
+              console.log('📦 Shipments in transit (fallback data)');
+            } else if (shipmentData.shipments.length > 0 && !hasActuallyShippedShipments) {
+              effectiveOrderStatus = 'awaiting_fulfillment';
+              console.log('📦 Labels created but not shipped (fallback data)');
+            }
           }
           
         } else {
           // No 17track configured
           console.log('17track not configured, using ShipStation data only');
           
+          let hasDeliveredShipments = false;
+          let hasInTransitShipments = false;
+          let hasActuallyShippedShipments = false;
+          
           shipmentData.shipments.forEach((shipment, index) => {
             const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
             const carrierName = getStandardCarrierName(shipment.carrierCode);
             const isDelivered = checkShipmentDeliveryStatus(shipment);
+            // Without 17track, assume shipped if there's a tracking number, otherwise processing
+            const actuallyShipped = shipment.trackingNumber ? true : false;
+            
+            // Update status tracking
+            if (isDelivered) {
+              hasDeliveredShipments = true;
+            } else if (actuallyShipped) {
+              hasInTransitShipments = true;
+              hasActuallyShippedShipments = true;
+            }
             
             shipments.push({
               shipmentId: shipment.shipmentId,
@@ -263,11 +307,27 @@ exports.handler = async (event, context) => {
               shipDate: shipment.shipDate,
               deliveryDate: shipment.deliveryDate || null,
               isDelivered: isDelivered,
+              actuallyShipped: actuallyShipped,
               shipmentNumber: index + 1,
               totalShipments: shipmentData.shipments.length,
               items: shipment.shipmentItems || []
             });
           });
+          
+          // Determine overall order status based on ShipStation data
+          if (hasDeliveredShipments && shipmentData.shipments.every(s => checkShipmentDeliveryStatus(s))) {
+            effectiveOrderStatus = 'delivered';
+            console.log('📦 All shipments delivered (ShipStation data)');
+          } else if (hasDeliveredShipments) {
+            effectiveOrderStatus = 'partially_delivered';
+            console.log('📦 Some shipments delivered (ShipStation data)');
+          } else if (hasInTransitShipments) {
+            effectiveOrderStatus = 'shipped';
+            console.log('📦 Shipments in transit (ShipStation data)');
+          } else if (shipmentData.shipments.length > 0 && !hasActuallyShippedShipments) {
+            effectiveOrderStatus = 'awaiting_fulfillment';
+            console.log('📦 Labels created but not shipped (ShipStation data)');
+          }
         }
       } else {
         console.log('No shipments found for this order');
