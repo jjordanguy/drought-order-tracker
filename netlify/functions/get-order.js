@@ -711,7 +711,22 @@ function checkShipmentDeliveryStatus(shipment) {
   return false;
 }
 
-function getStandardCarrierName(carrierCode) {
+// UPDATED: Improved carrier name function that uses 17track data when available
+function getStandardCarrierName(carrierCode, carrier17trackName = null) {
+  // First try to use 17track carrier name for better accuracy
+  if (carrier17trackName) {
+    const name = carrier17trackName.toLowerCase();
+    if (name.includes('ups')) return 'UPS';
+    if (name.includes('fedex')) return 'FedEx';
+    if (name.includes('usps') || name.includes('postal')) return 'USPS';
+    if (name.includes('dhl')) return 'DHL';
+    if (name.includes('ontrac')) return 'OnTrac';
+    if (name.includes('lasership')) return 'LaserShip';
+    if (name.includes('amazon')) return 'Amazon Logistics';
+    if (name.includes('newgistics')) return 'Newgistics';
+  }
+  
+  // Fallback to carrier code mapping
   if (!carrierCode) return 'CARRIER';
   
   const carrierNames = {
@@ -726,7 +741,7 @@ function getStandardCarrierName(carrierCode) {
     'dhl_express': 'DHL',
     'ontrac': 'OnTrac',
     'lasership': 'LaserShip',
-    'amazon': 'Amazon',
+    'amazon': 'Amazon Logistics',
     'newgistics': 'Newgistics'
   };
   
