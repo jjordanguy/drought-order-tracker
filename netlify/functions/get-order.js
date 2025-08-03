@@ -343,12 +343,18 @@ async function getShipmentsWithTracking(shipments, apiKey) {
         // NO carrier - let it auto-detect
       }], apiKey);
       
-      // Check if we got data
+      // Check if we got data - CORRECTED: latest_status is inside track_info
       let hasValidData = false;
       if (trackingData && trackingData.data && trackingData.data.accepted && trackingData.data.accepted.length > 0) {
         const acceptedData = trackingData.data.accepted[0];
         // Check if we have actual tracking info (not just registration)
-        hasValidData = acceptedData.latest_status && acceptedData.latest_status.status;
+        hasValidData = acceptedData.track_info && 
+                      acceptedData.track_info.latest_status && 
+                      acceptedData.track_info.latest_status.status;
+        
+        if (hasValidData) {
+          console.log(`✅ Found valid tracking data: ${acceptedData.track_info.latest_status.status}`);
+        }
       }
       
       // Step 2: If no data, register and wait
@@ -382,7 +388,7 @@ async function getShipmentsWithTracking(shipments, apiKey) {
             
             if (trackingData && trackingData.data && trackingData.data.accepted && trackingData.data.accepted.length > 0) {
               const acceptedData = trackingData.data.accepted[0];
-              if (acceptedData.latest_status && acceptedData.latest_status.status) {
+              if (acceptedData.track_info && acceptedData.track_info.latest_status && acceptedData.track_info.latest_status.status) {
                 console.log(`✅ Got tracking data for ${shipment.trackingNumber} on attempt ${attempt + 1}`);
                 hasValidData = true;
                 break;
@@ -399,7 +405,7 @@ async function getShipmentsWithTracking(shipments, apiKey) {
         console.log(`✅ Found existing data for ${shipment.trackingNumber}`);
       }
       
-      // Step 4: Process the tracking data using v2.2 format
+      // Step 4: Process the tracking data using v2.2 format - CORRECTED PATHS
       let actuallyShipped = false;
       let isDelivered = false;
       let deliveryDate = null;
@@ -410,11 +416,12 @@ async function getShipmentsWithTracking(shipments, apiKey) {
         const acceptedData = trackingData.data.accepted[0];
         
         console.log(`📊 v2.2 Analysis for ${shipment.trackingNumber}:`);
-        console.log(`Latest Status:`, acceptedData.latest_status);
+        console.log(`Track Info:`, JSON.stringify(acceptedData.track_info, null, 2));
         
-        if (acceptedData.latest_status) {
-          trackingStatus = acceptedData.latest_status.status || '';
-          const subStatus = acceptedData.latest_status.sub_status || '';
+        if (acceptedData.track_info && acceptedData.track_info.latest_status) {
+          const latestStatus = acceptedData.track_info.latest_status;
+          trackingStatus = latestStatus.status || '';
+          const subStatus = latestStatus.sub_status || '';
           
           console.log(`Status: "${trackingStatus}", Sub-status: "${subStatus}"`);
           
@@ -423,7 +430,10 @@ async function getShipmentsWithTracking(shipments, apiKey) {
             case 'delivered':
               actuallyShipped = true;
               isDelivered = true;
-              deliveryDate = acceptedData.latest_status.time || null;
+              // Get delivery date from latest_event
+              if (acceptedData.track_info.latest_event && acceptedData.track_info.latest_event.time_iso) {
+                deliveryDate = acceptedData.track_info.latest_event.time_iso;
+              }
               break;
               
             case 'intransit':
@@ -447,6 +457,7 @@ async function getShipmentsWithTracking(shipments, apiKey) {
               
             case 'pending':
             case 'info_received':
+            case 'inforeceived':
             case 'not_found':
             default:
               actuallyShipped = false;
@@ -454,21 +465,21 @@ async function getShipmentsWithTracking(shipments, apiKey) {
               break;
           }
           
-          // Get latest activity from track_info
-          if (acceptedData.track_info && acceptedData.track_info.length > 0) {
-            const latestEvent = acceptedData.track_info[0]; // Most recent first
+          // Get latest activity from latest_event
+          if (acceptedData.track_info.latest_event) {
+            const latestEvent = acceptedData.track_info.latest_event;
             latestActivity = {
-              status: latestEvent.status || trackingStatus,
+              status: latestEvent.description || trackingStatus,
               location: latestEvent.location || '',
-              time: latestEvent.time || acceptedData.latest_status.time || '',
-              description: latestEvent.status || trackingStatus
+              time: latestEvent.time_iso || latestEvent.time_utc || '',
+              description: latestEvent.description || trackingStatus
             };
           } else {
             // Fallback to latest_status
             latestActivity = {
               status: trackingStatus,
               location: '',
-              time: acceptedData.latest_status.time || '',
+              time: '',
               description: trackingStatus
             };
           }
@@ -478,7 +489,9 @@ async function getShipmentsWithTracking(shipments, apiKey) {
             actuallyShipped = true;
           }
           
-          console.log(`📦 Final v2.2 result: ${shipment.trackingNumber} shipped=${actuallyShipped}, delivered=${isDelivered}`);
+          console.log(`📦 Final v2.2 result: ${shipment.trackingNumber} shipped=${actuallyShipped}, delivered=${isDelivered}, status="${trackingStatus}"`);
+        } else {
+          console.log(`❌ No track_info.latest_status found for ${shipment.trackingNumber}`);
         }
       }
       
