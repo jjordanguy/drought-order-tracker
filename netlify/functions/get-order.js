@@ -172,8 +172,8 @@ exports.handler = async (event, context) => {
             let hasActuallyShippedShipments = false;
             
             trackedShipments.forEach((shipment, index) => {
-              const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber);
-              const carrierName = getStandardCarrierName(shipment.carrierCode);
+              const trackingUrl = generateTrackingUrl(shipment.carrierCode, shipment.trackingNumber, shipment.carrier17trackName);
+              const carrierName = getStandardCarrierName(shipment.carrierCode, shipment.carrier17trackName);
               
               // Determine shipment status from 17track v2.2 data
               let shipmentStatus = 'processing';
@@ -501,7 +501,8 @@ async function getShipmentsWithTracking(shipments, apiKey) {
         isDelivered: isDelivered,
         deliveryDate: deliveryDate || shipment.deliveryDate,
         trackingStatus: trackingStatus,
-        latestActivity: latestActivity
+        latestActivity: latestActivity,
+        carrier17trackName: get17trackCarrierName(trackingData) // Add 17track carrier name
       });
       
     } catch (error) {
@@ -638,9 +639,49 @@ function makeShipStationRequest(endpoint, auth) {
   });
 }
 
-// Helper functions (unchanged)
-function generateTrackingUrl(carrierCode, trackingNumber) {
-  if (!trackingNumber || !carrierCode) {
+// Helper function to extract carrier name from 17track response
+function get17trackCarrierName(trackingData) {
+  if (!trackingData || !trackingData.data || !trackingData.data.accepted || trackingData.data.accepted.length === 0) {
+    return null;
+  }
+  
+  const acceptedData = trackingData.data.accepted[0];
+  
+  // Try to get carrier name from tracking providers
+  if (acceptedData.track_info && 
+      acceptedData.track_info.tracking && 
+      acceptedData.track_info.tracking.providers && 
+      acceptedData.track_info.tracking.providers.length > 0) {
+    
+    const provider = acceptedData.track_info.tracking.providers[0].provider;
+    return provider.name || provider.alias || null;
+  }
+  
+  return null;
+}
+
+// UPDATED: Function to generate tracking URLs (handles 17track carrier names)  
+function generateTrackingUrl(carrierCode, trackingNumber, carrier17trackName = null) {
+  if (!trackingNumber) {
+    return null;
+  }
+  
+  // Determine the carrier for URL generation
+  let carrierForUrl = carrierCode;
+  
+  // If we have 17track carrier name, use it to determine the right URL
+  if (carrier17trackName) {
+    const name = carrier17trackName.toLowerCase();
+    if (name.includes('ups')) carrierForUrl = 'ups';
+    else if (name.includes('fedex')) carrierForUrl = 'fedex';
+    else if (name.includes('usps')) carrierForUrl = 'usps';
+    else if (name.includes('dhl')) carrierForUrl = 'dhl';
+    else if (name.includes('ontrac')) carrierForUrl = 'ontrac';
+    else if (name.includes('lasership')) carrierForUrl = 'lasership';
+    else if (name.includes('amazon')) carrierForUrl = 'amazon';
+  }
+  
+  if (!carrierForUrl) {
     return null;
   }
   
@@ -659,7 +700,7 @@ function generateTrackingUrl(carrierCode, trackingNumber) {
     'amazon': `https://track.amazon.com/tracking/${trackingNumber}`
   };
   
-  return trackingUrls[carrierCode.toLowerCase()] || null;
+  return trackingUrls[carrierForUrl.toLowerCase()] || null;
 }
 
 function checkShipmentDeliveryStatus(shipment) {
